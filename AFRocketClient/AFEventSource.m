@@ -192,6 +192,24 @@ typedef NS_ENUM(NSUInteger, AFEventSourceState) {
     return self.requestOperation.response;
 }
 
+-(void)retry{
+
+    if(self.retryInterval > 0 ){
+        dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, self.retryInterval * NSEC_PER_SEC);
+        dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
+            NSError * error ;
+            NSLog(@"Retrying");
+
+            [self open:&error];
+            if(error){
+                NSLog(@"Unable to retry %@",[error localizedDescription]);
+                [self close:&error];
+                [self retry];
+            }
+        });
+    }
+}
+
 - (BOOL)open:(NSError * __autoreleasing *)error {
     if ([self isOpen]) {
         if (error) {
@@ -203,19 +221,24 @@ typedef NS_ENUM(NSUInteger, AFEventSourceState) {
 
     [self.lock lock];
     self.state = AFEventSourceConnecting;
-
+    self.offset = 0;
+    
     self.requestOperation = [[AFHTTPRequestOperation alloc] initWithRequest:self.request];
     self.requestOperation.responseSerializer = [AFServerSentEventResponseSerializer serializer];
     self.outputStream = [NSOutputStream outputStreamToMemory];
     self.outputStream.delegate = self;
     self.requestOperation.outputStream = self.outputStream;
 
-    // TODO Determine correct retry behavior / customization
-//    [self.requestOperation setCompletionBlockWithSuccess:^(AFHTTPRequestOperation *operation, id responseObject) {
-//        NSLog(@"Success: %@", responseObject);
-//    } failure:^(AFHTTPRequestOperation *operation, NSError *error) {
-//        NSLog(@"Failure: %@", error);
-//    }];
+    // add completion block operation in order to retry
+    __block AFEventSource *source = self;
+    [self.requestOperation setCompletionBlockWithSuccess:^(AFHTTPRequestOperation *operation, id responseObject) {
+        NSLog(@"Normal completion please retry");
+         [source retry];
+    } failure:^(AFHTTPRequestOperation *operation, NSError *error) {
+        NSLog(@"Failure completion please retry  %@",error);
+
+        [source retry];
+    }];
     
     [self.requestOperation start];
 
@@ -286,6 +309,7 @@ typedef NS_ENUM(NSUInteger, AFEventSourceState) {
             NSData *data = [stream propertyForKey:NSStreamDataWrittenToMemoryStreamKey];
             NSError *error = nil;
             AFServerSentEvent *event = [[AFServerSentEventResponseSerializer serializer] responseObjectForResponse:self.lastResponse data:[data subdataWithRange:NSMakeRange(self.offset, [data length] - self.offset)] error:&error];
+            
             self.offset = [data length];
 
             if (error) {
@@ -298,7 +322,7 @@ typedef NS_ENUM(NSUInteger, AFEventSourceState) {
                         [self.delegate eventSource:self didReceiveMessage:event];
                     }
 
-                    for (AFServerSentEventBlock block in [self.listenersKeyedByEvent objectForKey:event.event]) {
+                    for (AFServerSentEventBlock block in [[self.listenersKeyedByEvent objectForKey:event.event] allValues]) {
                         if (block) {
                             block(event);
                         }
